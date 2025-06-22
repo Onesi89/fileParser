@@ -6,6 +6,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -13,7 +14,7 @@ import parser.data.ParseResult;
 
 public class DistributedBufferedWriter {
 	private String outputPath;
-	private Map<String, StringBuffer> buffers;
+	private Map<String, StringBuilder> buffers;
 	private Map<String, Integer> bufferSizes;
 	private Map<String, Integer> fileCounters;
 	private Map<String, Long> currentFileSizes;
@@ -22,10 +23,11 @@ public class DistributedBufferedWriter {
 	private final int BUFFER_THRESHOLD;
 	private final long FILE_SIZE_LIMIT;
 	private final String LAST_NAME = ".csv";
-	
-	String[] types;
 
-	public DistributedBufferedWriter(String outputPath, int bufferThresholdKB, int fileSizeLimitMB, String[] types) throws Exception {
+	private final String[] types;
+
+	public DistributedBufferedWriter(String outputPath, int bufferThresholdKB, int fileSizeLimitMB, String[] types)
+			throws Exception {
 		this.outputPath = outputPath;
 		this.BUFFER_THRESHOLD = bufferThresholdKB * 1024;
 		this.FILE_SIZE_LIMIT = fileSizeLimitMB * 1024L * 1024L;
@@ -36,7 +38,7 @@ public class DistributedBufferedWriter {
 		this.currentFileSizes = new HashMap<>();
 		this.firstWrite = new HashMap<>();
 		this.types = types;
-		
+
 		initializeBuffers();
 		cleanupExistingFiles(); // 기존 파일 정리
 
@@ -47,13 +49,13 @@ public class DistributedBufferedWriter {
 		}
 	}
 
-	private void initializeBuffers() throws Exception{
-		if(this.types.length < 1) { 
-			throw new Exception("ERROR");
+	private void initializeBuffers() throws Exception {
+		if (this.types.length < 1) {
+			throw new Exception("ERROR: 파서 타입이 비어있습니다.");
 		}
-		
+
 		for (String type : this.types) {
-			buffers.put(type, new StringBuffer());
+			buffers.put(type, new StringBuilder());
 			bufferSizes.put(type, 0);
 			fileCounters.put(type, 1);
 			currentFileSizes.put(type, 0L);
@@ -62,17 +64,17 @@ public class DistributedBufferedWriter {
 	}
 
 	private void cleanupExistingFiles() {
-		for (String type :this.types) {
+		for (String type : this.types) {
 			try {
 				// 기본 파일 삭제
 				Path mainFile = Paths.get(outputPath, type + LAST_NAME);
 				Files.deleteIfExists(mainFile);
 
-				// 분산된 파일들도 삭제 (최대 10개까지 체크)
+				// 분산 파일들 삭제 최적화
 				for (int i = 2; i <= 10; i++) {
 					Path splitFile = Paths.get(outputPath, type + "_" + i + LAST_NAME);
-					if (Files.exists(splitFile)) {
-						Files.deleteIfExists(splitFile);
+					if (!Files.deleteIfExists(splitFile)) {
+						break;
 					}
 				}
 
@@ -89,7 +91,9 @@ public class DistributedBufferedWriter {
 		String content = result.getOutputContent();
 
 		buffers.get(type).append(content);
-		bufferSizes.put(type, bufferSizes.get(type) + content.getBytes().length);
+
+		int estimatedBytes = content.length() * 2; // UTF-8 한글 고려한 대략적 계산
+		bufferSizes.put(type, bufferSizes.get(type) + estimatedBytes);
 
 		if (bufferSizes.get(type) >= BUFFER_THRESHOLD) {
 			flushBuffer(type);
@@ -98,11 +102,11 @@ public class DistributedBufferedWriter {
 
 	private void flushBuffer(String type) {
 		try {
-			StringBuffer buffer = buffers.get(type);
-			if (buffer.length() == 0)
-				return;
+			StringBuilder buffer = buffers.get(type);
+			if (buffer.length() == 0) return;
 
-			int contentSize = buffer.toString().getBytes().length;
+			String content = buffer.toString();
+			int contentSize = content.getBytes().length;
 			long currentFileSize = currentFileSizes.get(type);
 
 			if (currentFileSize + contentSize > FILE_SIZE_LIMIT) {
@@ -115,13 +119,12 @@ public class DistributedBufferedWriter {
 			StandardOpenOption writeOption = firstWrite.get(type) ? StandardOpenOption.CREATE
 					: StandardOpenOption.APPEND;
 
-			try (BufferedWriter writer = Files.newBufferedWriter(filePath, StandardOpenOption.CREATE,
-					writeOption)) {
+			try (BufferedWriter writer = Files.newBufferedWriter(filePath, StandardOpenOption.CREATE, writeOption)) {
 
 				writer.write(buffer.toString());
 
 				currentFileSizes.put(type, currentFileSizes.get(type) + contentSize);
-				buffers.get(type).setLength(0);
+				buffer.setLength(0);
 				bufferSizes.put(type, 0);
 				firstWrite.put(type, false); // 첫 번째 쓰기 완료
 
@@ -137,7 +140,6 @@ public class DistributedBufferedWriter {
 		int currentCounter = fileCounters.get(type);
 		fileCounters.put(type, currentCounter + 1);
 		currentFileSizes.put(type, 0L);
-		
 		firstWrite.put(type, true); // 새 파일은 첫 번째 쓰기로 설정
 
 		System.out.println(
@@ -150,11 +152,7 @@ public class DistributedBufferedWriter {
 
 	private String getCurrentFileName(String type) {
 		int counter = fileCounters.get(type);
-		if (counter == 1) {
-			return type + LAST_NAME;
-		} else {
-			return type + "_" + counter + LAST_NAME;
-		}
+		return counter == 1 ? type + LAST_NAME : type + "_" + counter + LAST_NAME;
 	}
 
 	public void flushAll() {
